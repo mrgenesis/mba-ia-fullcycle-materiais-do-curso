@@ -1,0 +1,22 @@
+{
+  "name": "my-express-app",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start:prod": "node dist/server.js",
+    "start:dev": "tsx watch src/server.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "express": "5.2.1",
+    "dotenv": "17.3.1"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/node": "25.5.0",
+    "typescript": "6.0.2",
+    "tsx": "4.21.0",
+    "vitest": "4.1.2"
+  }
+}
