@@ -45,7 +45,7 @@ Cada sessão está salva em `__claude-sessions/` com o log completo da interaç�
 
 ## Skills e Agentes Customizados
 
-Os skills ficam em [.claude/skills/](.claude/skills/) e funcionam como **agentes especializados** que o Claude Code invoca via comando `/nome-do-skill`. Cada um conduz uma entrevista estruturada e gera um artefato padronizado.
+Os skills funcionam como **agentes especializados** invocados via comando `/nome-do-skill`. Cada um conduz uma entrevista estruturada e gera um artefato padronizado. Estão disponíveis para os **três agentes** (Claude Code, GitHub Copilot e Cursor):
 
 | Skill | Descrição | Artefato gerado |
 |-------|-----------|-----------------|
@@ -56,20 +56,44 @@ Os skills ficam em [.claude/skills/](.claude/skills/) e funcionam como **agentes
 | `generate-test-guide` | Analisa o tech stack do projeto e gera um guia de testes multi-arquivo como skill permanente | Skill de testes |
 | `testing-guide-dev-workflow-test` | Guia de testes permanente do CodeLearn — consultado sempre que se escreve ou revisa testes | Referência contínua |
 
+Os skills ficam replicados em três pastas para que cada agente os descubra nativamente:
+
+| Agente | Localização |
+|--------|-------------|
+| Claude Code | [.claude/skills/](.claude/skills/) |
+| GitHub Copilot | [.github/skills/](.github/skills/) |
+| Cursor | [.cursor/skills/](.cursor/skills/) |
+
 ---
 
 ## Regras de Código
 
-As regras em [.claude/rules/](.claude/rules/) são aplicadas automaticamente pelo agente ao gerar ou revisar código. Garantem consistência com as decisões arquiteturais do projeto.
+As mesmas regras são configuradas para os **três agentes** — Claude Code, GitHub Copilot e Cursor — garantindo que qualquer um gere código consistente com as decisões arquiteturais do projeto.
 
 | Regra | Escopo | O que define |
 |-------|--------|-------------|
-| `coding.md` | `**/*.ts` | Naming conventions (camelCase, PascalCase, kebab-case), estilo TypeScript, imports ESM |
-| `controllers.md` | `src/*/controllers/**` | Controllers como funções (não classes), fluxo extract → use case → response, propagação de erros via `next()` |
-| `error-handler.md` | `src/shared/middleware/` | Middleware global de erros: mapeamento de classes de erro → HTTP status codes |
-| `hexagonal-layers.md` | `src/*/domain/**`, `src/*/services/**`, etc. | Regras de dependência entre camadas: domínio nunca depende de infraestrutura |
-| `testing.md` | `**/*.test.ts`, `**/*.spec.ts` | Padrão AAA (Arrange-Act-Assert), posicionamento por camada, cleanup de banco com TRUNCATE |
-| `typeorm.md` | `src/*/models/**` | Dual ID (integer + UUID v4), soft delete, Data Mapper, naming de tabelas |
+| `coding` | `**/*.ts` | Naming conventions (camelCase, PascalCase, kebab-case), estilo TypeScript, imports ESM |
+| `controllers` | `src/*/controllers/**` | Controllers como funções (não classes), fluxo extract → use case → response, propagação de erros via `next()` |
+| `error-handler` | `src/shared/middleware/` | Middleware global de erros: mapeamento de classes de erro → HTTP status codes |
+| `hexagonal-layers` | `src/*/domain/**`, `src/*/services/**`, etc. | Regras de dependência entre camadas: domínio nunca depende de infraestrutura |
+| `testing` | `**/*.test.ts`, `**/*.spec.ts` | Padrão AAA (Arrange-Act-Assert), posicionamento por camada, cleanup de banco com TRUNCATE |
+| `typeorm` | `src/*/models/**` | Dual ID (integer + UUID v4), soft delete, Data Mapper, naming de tabelas |
+
+### Onde ficam as regras
+
+| Agente | Localização | Formato |
+|--------|-------------|---------|
+| Claude Code | [.claude/rules/](.claude/rules/) | `<regra>.md` com frontmatter `paths:` |
+| GitHub Copilot | [.github/instructions/](.github/instructions/) | `<regra>.instructions.md` com frontmatter `applyTo:` |
+| Cursor | [.cursor/rules/](.cursor/rules/) | `<regra>.mdc` com frontmatter `globs:` |
+
+As instruções globais do workspace (tech stack, estrutura, comandos) também são espelhadas:
+
+| Agente | Arquivo |
+|--------|---------|
+| Claude Code | [CLAUDE.md](CLAUDE.md) |
+| GitHub Copilot | [.github/copilot-instructions.md](.github/copilot-instructions.md) |
+| Cursor | [.cursor/rules/project-guidelines.mdc](.cursor/rules/project-guidelines.mdc) (com `alwaysApply: true`) |
 
 ---
 
@@ -179,6 +203,13 @@ docs/                           # documentação gerada pelos skills
 .claude/
   /skills                       # skills customizados do Claude Code
   /rules                        # regras de código para o agente
+.cursor/
+  /skills                       # skills customizados do Cursor
+  /rules                        # regras de código para o Cursor (.mdc)
+.github/
+  copilot-instructions.md       # instruções globais do Copilot
+  /instructions                 # regras de código para o Copilot
+  /skills                       # skills customizados do Copilot
 ```
 
 ---
