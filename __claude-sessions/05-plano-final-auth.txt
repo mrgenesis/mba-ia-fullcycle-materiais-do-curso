@@ -1,0 +1,1029 @@
+## Plano de Implementacao: Gestao de Usuarios e Autenticacao (FDD-001)
+
+**Fonte**: FDD-001 v1.0 + EPIC-001
+**Data**: 2026-03-27
+**Estimativa total**: ~16 dias-dev
+**Caminho critico**: T01 → T02 → T03 → T07/T08 → T09/T10 → T11-T18 → T19 → T20/T21 → T22 → T23/T24
+
+---
+
+### Contexto
+
+O modulo User e o modulo raiz da plataforma CodeLearn — todos os demais dependem dele para autenticacao e autorizacao. A codebase esta em estado greenfield: existe apenas `app.ts` (Express com JSON middleware), `server.ts` (listen porta 3000) e um stub `login-use-case.ts`. Nao ha entidades, repositorios, migrations, middleware, DI container ou testes.
+
+Este plano implementa STORY-001 a STORY-005 do EPIC-001: CRUD de usuarios, autenticacao JWT com sessao server-side, gestao de papeis, bloqueio/desbloqueio com invalidacao imediata de sessoes, e isolamento de dados por papel.
+
+---
+
+### Decisao em aberto: Shape de erro
+
+**Conflito identificado:**
+- FDD-001 secao 5 define: `{ "error": "ERROR_CODE", "message": "...", "details": [...] }`
+- Regra `error-handler.md` define: `{ "error": { "code": "ERROR_CODE", "message": "..." } }`
+
+O plano segue a shape do FDD (flat) pois e o contrato publico da API. A regra `error-handler.md` deve ser atualizada para refletir isso.
+
+---
+
+### Visao geral das fases
+
+| Fase | Descricao | Tasks | Estimativa |
+|---|---|---|---|
+| 1 | Fundacao (deps, config, DB, erros, testes, DI) | T01-T07 | ~4 dias-dev |
+| 2 | Domain Layer (entidades, ports) | T08-T10 | ~2 dias-dev |
+| 3 | Infrastructure Layer (models, repositories) | T11-T14 | ~3.5 dias-dev |
+| 4 | Application Layer (use cases) | T15-T22 | ~7 dias-dev |
+| 5 | Auth Infrastructure (middleware) | T23-T25 | ~2 dias-dev |
+| 6 | HTTP Layer (controllers, DI wiring, rotas) | T26-T30 | ~4 dias-dev |
+| 7 | Verificacao E2E e Observabilidade | T31-T33 | ~2 dias-dev |
+
+*Nota: fases 2+1(parcial) sao paralelizaveis; fases 4+5 sao parcialmente paralelizaveis.*
+
+---
+
+### Tasks detalhadas
+
+#### Fase 1: Fundacao
+
+##### T01: Instalar dependencias e resolver conflito TypeScript/decorators
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: nenhuma
+- **Desbloqueia**: T02, T03, T04, T05, T06, T07, T08, T09
+
+**Descricao tecnica**
+Instalar todos os pacotes necessarios e resolver o conflito `erasableSyntaxOnly: true` vs `emitDecoratorMetadata` (necessario para decorators TypeORM).
+
+**Abordagem sugerida**
+- Produção: `typeorm@0.3.28`, `inversify`, `reflect-metadata`, `argon2`, `jsonwebtoken`, `pg`
+- Dev: `@types/jsonwebtoken`, `supertest`, `@types/supertest`
+- Resolver conflito TS: remover `erasableSyntaxOnly` e adicionar `experimentalDecorators: true` + `emitDecoratorMetadata: true` no `tsconfig.json`
+- Verificar se `argon2` compila no container Docker (`node:25.6.0-slim` pode precisar de build tools — se falhar, adicionar `python3 make g++` ao `Dockerfile.dev`)
+- Remover `src/login-use-case.ts` (stub POC)
+
+**Criterios de aceite**
+- [ ] Todos os pacotes instalados sem erro dentro do container Docker
+- [ ] `npm run build` compila sem erros
+- [ ] Decorators TypeORM funcionam (testar com um `@Entity()` trivial)
+- [ ] `argon2.hash('test')` executa sem erro no container
+
+**Arquivos**: `package.json`, `tsconfig.json`, `Dockerfile.dev` (se necessario)
+
+---
+
+##### T02: Configuracao de ambiente centralizada
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T01
+- **Desbloqueia**: T03
+
+**Descricao tecnica**
+Criar modulo de config que le variaveis de ambiente com defaults para Docker Compose dev.
+
+**Abordagem sugerida**
+Objeto frozen exportado com: `port`, `db` (host, port, username, password, database), `jwt` (secret, accessTokenExpiration: '15m', refreshTokenExpiration: '7d'), `argon2` (timeCost, memoryCost, parallelism).
+
+**Criterios de aceite**
+- [ ] Config carrega sem `.env` (defaults funcionam com Docker Compose)
+- [ ] Valores sao tipados e imutaveis (`Object.freeze`)
+
+**Arquivo**: `src/shared/config/env.ts`
+
+---
+
+##### T03: TypeORM DataSource
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T02
+- **Desbloqueia**: T06, T11, T12
+
+**Descricao tecnica**
+Criar DataSource singleton e inicializar antes do server.listen().
+
+**Abordagem sugerida**
+- DataSource com `type: 'postgres'`, config do env, `synchronize: true` (dev), `entities` apontando para models
+- Modificar `server.ts`: `AppDataSource.initialize().then(() => app.listen(...))`
+
+**Criterios de aceite**
+- [ ] DataSource conecta ao PostgreSQL do Docker Compose
+- [ ] Tabelas sao criadas automaticamente (synchronize)
+
+**Arquivos**: `src/shared/config/data-source.ts`, `src/server.ts`
+
+---
+
+##### T04: Classes de erro customizadas
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T01
+- **Desbloqueia**: T05, T08, T15-T22
+- **Paralelizavel com**: T02, T03
+
+**Descricao tecnica**
+Criar hierarquia de erros conforme FDD secao 6.
+
+**Classes a criar:**
+- `AppError` (base): `statusCode`, `code`, `message`, `details?: string[]`
+- `NotFoundError` — 404, `NOT_FOUND`
+- `ConflictError` — 409, `CONFLICT`
+- `ValidationError` — 422, `VALIDATION_ERROR`, aceita `details: string[]`
+- `UnauthorizedError` — 401, `UNAUTHORIZED`
+- `ForbiddenError` — 403, `FORBIDDEN`
+- `index.ts` — barrel exports
+
+**Criterios de aceite**
+- [ ] Cada erro tem `statusCode`, `code` e `message` corretos
+- [ ] `ValidationError` aceita e expoe array de `details`
+- [ ] Teste unitario para `ValidationError` (unica com logica de branching)
+
+**Arquivos**: `src/shared/errors/app-error.ts`, `not-found-error.ts`, `conflict-error.ts`, `validation-error.ts`, `unauthorized-error.ts`, `forbidden-error.ts`, `index.ts`
+**Teste**: `src/shared/__tests__/unit/validation-error.test.ts`
+
+---
+
+##### T05: Global Error Handler Middleware
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T04
+- **Desbloqueia**: T26, T27
+
+**Descricao tecnica**
+Middleware Express que mapeia erros customizados para responses HTTP.
+
+**Response shape (FDD secao 5 — ver decisao em aberto acima):**
+```json
+{ "error": "ERROR_CODE", "message": "...", "details": [] }
+```
+
+Erros desconhecidos → 500 `INTERNAL_ERROR` com mensagem generica. Log completo server-side antes de responder. Registrar em `app.ts` como ultimo middleware.
+
+**Criterios de aceite**
+- [ ] Mapeia cada `AppError` subclass para o status code correto
+- [ ] Erros desconhecidos retornam 500 com mensagem generica (sem stack trace)
+- [ ] Loga erro completo antes de responder
+- [ ] Registrado em `app.ts`
+
+**Arquivos**: `src/shared/middleware/error-handler.ts`, `src/app.ts`
+
+---
+
+##### T06: Infraestrutura de testes
+
+- **Complexidade**: M
+- **Estimativa**: 1 dia-dev
+- **Depende de**: T01, T03
+- **Desbloqueia**: T11, T12, T13, T14
+
+**Descricao tecnica**
+Setup de helpers e config do Vitest para testes de integracao e E2E.
+
+**Abordagem sugerida**
+- `test-data-source.ts`: factory para DataSource com banco `lms_test`, `synchronize: true`, `dropSchema: true`
+- `test-tokens.ts`: helpers para gerar JWTs validos com roles configuraveis (admin, student, etc.)
+- `test-fixtures.ts`: factories para criar usuarios e sessoes de teste
+- Global setup do Vitest: criar banco `lms_test` se nao existir
+- Scripts no `package.json`: `test:unit`, `test:integration`, `test:e2e`
+
+**Criterios de aceite**
+- [ ] `lms_test` database criado automaticamente no setup
+- [ ] `test-data-source` conecta e sincroniza modelos
+- [ ] `test-tokens` gera JWTs decodificaveis com roles customizados
+- [ ] Todos os comandos de teste executam sem erro (mesmo sem testes ainda)
+
+**Arquivos**: `test/helpers/test-data-source.ts`, `test/helpers/test-tokens.ts`, `test/helpers/test-fixtures.ts`, `vitest.config.ts`, `package.json`
+
+---
+
+##### T07: Skeleton do DI Container (InversifyJS)
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T01
+- **Desbloqueia**: T26
+- **Paralelizavel com**: T02, T03, T04
+
+**Descricao tecnica**
+Setup do container global e symbols do modulo User.
+
+**Abordagem sugerida**
+- `container.ts` global: cria Container, carrega ContainerModules
+- `user/container/types.ts`: Symbols para UserRepository, SessionRepository, todos os use cases
+- `user/container/index.ts`: ContainerModule vazio (populado na T26)
+- Usar `ContainerModule` + `toDynamicValue` (sem decorators `@injectable`/`@inject`)
+
+**Criterios de aceite**
+- [ ] Container global carrega sem erro
+- [ ] Symbols definidos para todos os servicos planejados
+
+**Arquivos**: `src/shared/container.ts`, `src/user/container/types.ts`, `src/user/container/index.ts`
+
+---
+
+#### Fase 2: Domain Layer
+
+##### T08: Entidade de dominio User
+
+- **Complexidade**: M
+- **Estimativa**: 1.5 dia-dev
+- **Depende de**: T01, T04
+- **Desbloqueia**: T10, T11, T13, T15-T22
+- **Paralelizavel com**: T02, T03, T06, T07, T09
+
+**Descricao tecnica**
+Entidade pura (sem imports de framework) com todas as regras de negocio do FDD secao 2.
+
+**Propriedades**: `uuid`, `name`, `email`, `passwordHash`, `roles: UserRole[]`, `status: UserStatus`, `createdAt`, `updatedAt`
+
+**Regras de negocio codificadas:**
+- Nome: nao vazio, max 100 chars
+- Email: formato valido (regex basico)
+- Senha (metodo estatico `validatePassword(plain)`): min 8 chars, 1 maiuscula, 1 minuscula, 1 digito, 1 simbolo → retorna `string[]` de criterios nao atendidos
+- Papeis: ao menos 1, todos devem ser validos (`student | professor | tutor | admin`)
+- Status: `active | blocked`, metodos `block()` e `unblock()`
+- `setRoles(roles)`: valida invariante de min 1 papel
+
+**Criterios de aceite**
+- [ ] Criacao valida com todos os campos corretos
+- [ ] Rejeita nome vazio ou > 100 chars
+- [ ] Rejeita email com formato invalido
+- [ ] `validatePassword` retorna lista de criterios nao atendidos (cada um individualmente)
+- [ ] Rejeita roles vazio ou com papel invalido
+- [ ] `setRoles([])` lanca erro
+- [ ] `block()` muda status para `blocked`; `unblock()` para `active`
+- [ ] Testes unitarios com cobertura de todos os branches
+
+**Arquivo**: `src/user/domain/entities/user.entity.ts`
+**Teste**: `src/user/__tests__/unit/user.entity.test.ts`
+
+---
+
+##### T09: Entidade de dominio Session
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T01
+- **Desbloqueia**: T10, T12, T14
+- **Paralelizavel com**: T08
+
+**Descricao tecnica**
+Entidade pura para sessoes de autenticacao.
+
+**Propriedades**: `uuid`, `userId`, `refreshToken`, `active`, `expiresAt`, `createdAt`
+
+**Logica**: `invalidate()` → `active = false`; `isExpired()` → `expiresAt < now`; `isValid()` → `active && !isExpired()`
+
+**Criterios de aceite**
+- [ ] `invalidate()` marca `active = false`
+- [ ] `isExpired()` correto com datas passadas/futuras
+- [ ] `isValid()` combina `active` e `isExpired()`
+- [ ] Testes unitarios para todos os branches
+
+**Arquivo**: `src/user/domain/entities/session.entity.ts`
+**Teste**: `src/user/__tests__/unit/session.entity.test.ts`
+
+---
+
+##### T10: Interfaces de Port (contratos de repositorio)
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T08, T09
+- **Desbloqueia**: T13, T14, T15-T22
+
+**Descricao tecnica**
+Interfaces driving ports que os use cases consomem.
+
+**UserRepository:**
+```typescript
+save(user: User): Promise<User>
+findByEmail(email: string): Promise<User | null>
+findByEmailWithPassword(email: string): Promise<User | null>  // inclui passwordHash
+findByUuid(uuid: string): Promise<User | null>
+findAll(filters: UserFilters): Promise<PaginatedResult<User>>
+updateRoles(uuid: string, roles: UserRole[]): Promise<User>
+updateStatus(uuid: string, status: UserStatus): Promise<User>
+```
+
+**SessionRepository:**
+```typescript
+create(session: Session): Promise<Session>
+findByRefreshToken(token: string): Promise<Session | null>
+findActiveByUuid(uuid: string): Promise<Session | null>
+invalidate(uuid: string): Promise<void>
+invalidateAllForUser(userId: string): Promise<number>
+```
+
+**Tipos auxiliares**: `UserFilters`, `PaginatedResult<T>`
+
+**Criterios de aceite**
+- [ ] Interfaces completas para todos os metodos necessarios pelos use cases
+- [ ] Tipos auxiliares exportados
+
+**Arquivos**: `src/user/domain/ports/driving/user-repository.port.ts`, `src/user/domain/ports/driving/session-repository.port.ts`
+
+---
+
+#### Fase 3: Infrastructure Layer
+
+##### T11: TypeORM Model — User
+
+- **Complexidade**: M
+- **Estimativa**: 1 dia-dev
+- **Depende de**: T03, T06, T08
+- **Desbloqueia**: T13
+
+**Descricao tecnica**
+Modelo TypeORM separado da entidade de dominio, conforme regra de arquitetura hexagonal.
+
+**Tabela `users`:**
+- `id` (PK auto-increment, interno)
+- `uuid` (v4, unico, exposto na API)
+- `name` (varchar 100)
+- `email` (unico)
+- `passwordHash` (select: false — nunca retornado por default)
+- `roles` (simple-array — suficiente para 4 papeis fixos)
+- `status` (default: 'active')
+- `createdAt`, `updatedAt`, `deletedAt` (soft delete)
+
+**Criterios de aceite**
+- [ ] Tabela criada com schema correto via synchronize
+- [ ] UUID auto-gerado
+- [ ] Constraint unique em email
+- [ ] `passwordHash` nao retornado em queries normais (`select: false`)
+- [ ] Soft delete funciona (`softRemove` exclui de queries normais, `withDeleted` inclui)
+- [ ] Timestamps automaticos
+- [ ] Testes de integracao com PostgreSQL real
+
+**Arquivo**: `src/user/models/user.model.ts`
+**Teste**: `src/user/__tests__/integration/user-model.integration.test.ts`
+
+---
+
+##### T12: TypeORM Model — Session
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T03, T06, T09
+- **Desbloqueia**: T14
+- **Paralelizavel com**: T11
+
+**Descricao tecnica**
+Modelo TypeORM para tabela `sessions`.
+
+**Tabela `sessions`:**
+- `id` (PK auto-increment)
+- `uuid` (v4, unico)
+- `userId` (string — armazena uuid do user)
+- `refreshToken` (unico)
+- `active` (boolean, default: true)
+- `expiresAt` (timestamp)
+- `createdAt` (timestamp)
+- Indice em `(userId, active)` para lookup rapido no auth middleware
+
+**Criterios de aceite**
+- [ ] Tabela criada corretamente
+- [ ] UUID auto-gerado
+- [ ] Constraint unique em refreshToken
+- [ ] Default `active = true`
+- [ ] Testes de integracao
+
+**Arquivo**: `src/user/models/session.model.ts`
+**Teste**: `src/user/__tests__/integration/session-model.integration.test.ts`
+
+---
+
+##### T13: Repositorio User (implementacao TypeORM)
+
+- **Complexidade**: M
+- **Estimativa**: 1.5 dia-dev
+- **Depende de**: T10, T11
+- **Desbloqueia**: T15-T22
+
+**Descricao tecnica**
+Implementacao do port `UserRepository` usando TypeORM Data Mapper.
+
+**Responsabilidades criticas:**
+- Mapeamento bidirecional domain User ↔ UserModel (metodos `toDomain`/`toModel`)
+- `findByEmailWithPassword`: usa `addSelect('passwordHash')` para incluir hash no login flow
+- `findAll`: query builder com filtros opcionais (role, status, name ILIKE), paginacao com `skip`/`take`
+- Exclui soft-deleted automaticamente (TypeORM `@DeleteDateColumn` faz isso)
+
+**Criterios de aceite**
+- [ ] `save` persiste e retorna entidade de dominio com uuid
+- [ ] `findByEmail` retorna `null` quando nao encontrado
+- [ ] `findByEmail` retorna entidade sem passwordHash
+- [ ] `findByEmailWithPassword` retorna entidade COM passwordHash
+- [ ] `findByUuid` funciona corretamente
+- [ ] Soft-deleted users excluidos de queries normais
+- [ ] `updateRoles` persiste novos papeis
+- [ ] `updateStatus` persiste novo status
+- [ ] `findAll` sem filtros retorna resultado paginado
+- [ ] `findAll` filtra por role, status, name (parcial)
+- [ ] `findAll` paginacao correta (skip/take)
+- [ ] Email duplicado lanca erro de constraint
+- [ ] Testes de integracao com PostgreSQL real
+
+**Arquivo**: `src/user/repositories/typeorm-user.repository.ts`
+**Teste**: `src/user/__tests__/integration/typeorm-user.repository.integration.test.ts`
+
+---
+
+##### T14: Repositorio Session (implementacao TypeORM)
+
+- **Complexidade**: M
+- **Estimativa**: 1 dia-dev
+- **Depende de**: T10, T12
+- **Desbloqueia**: T16-T18, T20, T23
+- **Paralelizavel com**: T13
+
+**Descricao tecnica**
+Implementacao do port `SessionRepository` usando TypeORM.
+
+**Metodo critico:** `invalidateAllForUser(userId)` — deve setar `active = false` para TODAS as sessoes de um usuario. Retorna count de sessoes invalidadas (para log de observabilidade).
+
+**Criterios de aceite**
+- [ ] `create` persiste e retorna sessao
+- [ ] `findByRefreshToken` retorna `null` para token inexistente ou sessao inativa
+- [ ] `findByRefreshToken` retorna sessao ativa correta
+- [ ] `findActiveByUuid` retorna `null` para sessao inativa
+- [ ] `invalidate` marca sessao como inativa
+- [ ] `invalidateAllForUser` invalida TODAS as sessoes do usuario, retorna count correto
+- [ ] `invalidateAllForUser` nao afeta sessoes de outros usuarios
+- [ ] Testes de integracao com PostgreSQL real
+
+**Arquivo**: `src/user/repositories/typeorm-session.repository.ts`
+**Teste**: `src/user/__tests__/integration/typeorm-session.repository.integration.test.ts`
+
+---
+
+#### Fase 4: Application Layer (Use Cases)
+
+##### T15: Use Case — CreateUser
+
+- **Complexidade**: M
+- **Estimativa**: 1.5 dia-dev
+- **Depende de**: T04, T08, T10, T13
+- **Desbloqueia**: T26, T27
+
+**Descricao tecnica**
+Criacao de usuario por Admin (FDD fluxo principal, STORY-001).
+
+**Fluxo**: recebe `{name, email, password, roles}` → valida senha (domain entity) → valida campos (domain entity) → verifica email unico (repo) → hash argon2 → persiste → retorna sem senha
+
+**Contrato de API**
+
+| | |
+|---|---|
+| **Metodo/Rota** | `POST /v1/users` |
+| **Autenticacao** | Bearer token (papel: admin) |
+| **Request body** | `{ name: string (obrigatorio), email: string (obrigatorio), password: string (obrigatorio), roles: string[] (obrigatorio, min 1) }` |
+| **Response `201`** | `{ id: string, name: string, email: string, roles: string[], status: "active", created_at: string }` |
+| **Response `409`** | `{ error: "CONFLICT", message: "Email ja esta em uso" }` |
+| **Response `422`** | `{ error: "VALIDATION_ERROR", message: "Erro de validacao", details: ["Senha deve conter ao menos 1 letra maiuscula", ...] }` |
+| **Headers resposta** | `Cache-Control: no-store` |
+
+**Criterios de aceite**
+- [ ] Lanca `ValidationError` com details quando senha viola politica (cada criterio listado)
+- [ ] Lanca `ValidationError` para nome vazio ou > 100 chars
+- [ ] Lanca `ValidationError` para roles vazio ou papel invalido — mensagem: "Ao menos um papel e obrigatorio" / "Papel invalido"
+- [ ] Lanca `ConflictError` para email duplicado — mensagem: "Email ja esta em uso"
+- [ ] Retorna usuario sem passwordHash
+- [ ] Senha armazenada como hash argon2 no banco
+- [ ] Testes unitarios (mock repo) + testes de integracao (real DB)
+
+**Arquivos**: `src/user/services/create-user.usecase.ts`
+**Testes**: `src/user/__tests__/unit/create-user.usecase.test.ts`, `src/user/__tests__/integration/create-user.usecase.integration.test.ts`
+
+---
+
+##### T16: Use Case — Login
+
+- **Complexidade**: M
+- **Estimativa**: 1.5 dia-dev
+- **Depende de**: T04, T08, T09, T10, T13, T14
+- **Desbloqueia**: T26
+
+**Descricao tecnica**
+Autenticacao via email+senha (FDD fluxo login, STORY-004).
+
+**Fluxo**: recebe `{email, password}` → busca user com passwordHash → se nao encontrado: erro generico → verifica hash argon2 → se incorreto: mesmo erro generico → se bloqueado: erro especifico → cria sessao → gera access token JWT (15min, payload: sub=uuid, roles, sessionId) + refresh token → retorna tokens
+
+**Contrato de API**
+
+| | |
+|---|---|
+| **Metodo/Rota** | `POST /v1/auth/login` |
+| **Autenticacao** | publica |
+| **Request body** | `{ email: string (obrigatorio), password: string (obrigatorio) }` |
+| **Response `200`** | `{ access_token: string, refresh_token: string, expires_in: 900 }` |
+| **Response `401`** | `{ error: "UNAUTHORIZED", message: "Credenciais invalidas" }` |
+| **Response `403`** | `{ error: "FORBIDDEN", message: "Conta bloqueada" }` |
+| **Headers resposta** | `Cache-Control: no-store` |
+
+**Criterios de aceite**
+- [ ] Erro generico para email nao encontrado (NAO revela se email existe)
+- [ ] Erro generico para senha incorreta (mesma mensagem)
+- [ ] Erro especifico para conta bloqueada — mensagem: "Conta bloqueada"
+- [ ] Access token JWT com claims: `sub` (user uuid), `roles`, `sessionId`, `exp` (15min)
+- [ ] `expires_in: 900` no response
+- [ ] Sessao criada no banco via `sessionRepository.create`
+- [ ] Usa argon2 real (com config de teste de baixo custo) nos testes unitarios
+- [ ] Testes unitarios + integracao
+
+**Arquivos**: `src/user/services/login.usecase.ts`
+**Testes**: `src/user/__tests__/unit/login.usecase.test.ts`, `src/user/__tests__/integration/login.usecase.integration.test.ts`
+
+---
+
+##### T17: Use Case — RefreshToken
+
+- **Complexidade**: M
+- **Estimativa**: 1 dia-dev
+- **Depende de**: T04, T09, T10, T14
+- **Desbloqueia**: T26
+
+**Descricao tecnica**
+Renovacao de tokens com rotacao (FDD secao 5).
+
+**Fluxo**: recebe `{refresh_token}` → busca sessao ativa pelo token → se nao encontrada/expirada/inativa: erro → busca user → se bloqueado: erro → invalida sessao antiga → cria nova sessao → gera novos tokens → retorna
+
+**Contrato de API**
+
+| | |
+|---|---|
+| **Metodo/Rota** | `POST /v1/auth/refresh` |
+| **Autenticacao** | publica (refresh_token no body) |
+| **Request body** | `{ refresh_token: string (obrigatorio) }` |
+| **Response `200`** | `{ access_token: string, refresh_token: string, expires_in: 900 }` |
+| **Response `401`** | `{ error: "UNAUTHORIZED", message: "Refresh token invalido" }` |
+| **Headers resposta** | `Cache-Control: no-store` |
+
+**Criterios de aceite**
+- [ ] Lanca `UnauthorizedError` para refresh token nao encontrado
+- [ ] Lanca `UnauthorizedError` para sessao inativa
+- [ ] Lanca `UnauthorizedError` para sessao expirada
+- [ ] Lanca `UnauthorizedError` para usuario bloqueado
+- [ ] Rotacao: sessao antiga invalidada, nova criada
+- [ ] Retorna novo par de tokens
+- [ ] Testes unitarios + integracao
+
+**Arquivos**: `src/user/services/refresh-token.usecase.ts`
+**Testes**: `src/user/__tests__/unit/refresh-token.usecase.test.ts`, `src/user/__tests__/integration/refresh-token.usecase.integration.test.ts`
+
+---
+
+##### T18: Use Case — Logout
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T10, T14
+- **Desbloqueia**: T26
+
+**Descricao tecnica**
+Invalidacao de sessao no logout (FDD secao 3).
+
+**Fluxo**: recebe `sessionId` (do JWT via auth middleware) → invalida sessao → retorna void (204)
+
+**Contrato de API**
+
+| | |
+|---|---|
+| **Metodo/Rota** | `POST /v1/auth/logout` |
+| **Autenticacao** | Bearer token (qualquer papel) |
+| **Request body** | nenhum |
+| **Response `204`** | sem body |
+| **Response `401`** | token invalido ou sessao ja invalidada |
+| **Headers resposta** | `Cache-Control: no-store` |
+
+**Criterios de aceite**
+- [ ] Sessao marcada como inativa no banco
+- [ ] Teste de integracao (sem branching, nao precisa de teste unitario)
+
+**Arquivos**: `src/user/services/logout.usecase.ts`
+**Teste**: `src/user/__tests__/integration/logout.usecase.integration.test.ts`
+
+---
+
+##### T19: Use Case — UpdateRoles
+
+- **Complexidade**: M
+- **Estimativa**: 1 dia-dev
+- **Depende de**: T04, T08, T10, T13
+- **Desbloqueia**: T27
+
+**Descricao tecnica**
+Gestao de papeis por Admin (FDD fluxo gestao papeis, STORY-002).
+
+**Fluxo**: recebe `{userId, roles}` → valida papeis (min 1, todos validos) → busca user → se nao encontrado: 404 → atualiza papeis via domain entity → persiste → retorna
+
+**Contrato de API**
+
+| | |
+|---|---|
+| **Metodo/Rota** | `PATCH /v1/users/:id/roles` |
+| **Autenticacao** | Bearer token (papel: admin) |
+| **Request body** | `{ roles: string[] (obrigatorio, min 1) }` |
+| **Response `200`** | `{ id: string, name: string, email: string, roles: string[], status: string, updated_at: string }` |
+| **Response `404`** | `{ error: "NOT_FOUND", message: "Recurso nao encontrado" }` |
+| **Response `422`** | `{ error: "VALIDATION_ERROR", message: "Ao menos um papel e obrigatorio" }` ou `{ error: "VALIDATION_ERROR", message: "Papel invalido" }` |
+| **Headers resposta** | `Cache-Control: no-store` |
+
+**Criterios de aceite**
+- [ ] Lanca `NotFoundError` para usuario nao encontrado — mensagem: "Recurso nao encontrado"
+- [ ] Lanca `ValidationError` para roles vazio — mensagem: "Ao menos um papel e obrigatorio"
+- [ ] Lanca `ValidationError` para papel invalido — mensagem: "Papel invalido"
+- [ ] Retorna usuario atualizado com novos papeis
+- [ ] Testes unitarios + integracao
+
+**Arquivos**: `src/user/services/update-roles.usecase.ts`
+**Testes**: `src/user/__tests__/unit/update-roles.usecase.test.ts`, `src/user/__tests__/integration/update-roles.usecase.integration.test.ts`
+
+---
+
+##### T20: Use Case — UpdateStatus (Block/Unblock)
+
+- **Complexidade**: M
+- **Estimativa**: 1.5 dia-dev
+- **Depende de**: T04, T08, T09, T10, T13, T14
+- **Desbloqueia**: T27, T31
+
+**Descricao tecnica**
+Bloqueio/desbloqueio com invalidacao imediata de sessoes (FDD fluxo bloqueio, STORY-003).
+
+**Fluxo**: recebe `{userId, status}` → valida status (`active`/`blocked`) → busca user → se nao encontrado: 404 → atualiza status → **SE bloqueio**: `sessionRepository.invalidateAllForUser(userId)` (ZERO DELAY) → retorna
+
+**Contrato de API**
+
+| | |
+|---|---|
+| **Metodo/Rota** | `PATCH /v1/users/:id/status` |
+| **Autenticacao** | Bearer token (papel: admin) |
+| **Request body** | `{ status: "active" \| "blocked" (obrigatorio) }` |
+| **Response `200`** | `{ id: string, name: string, email: string, roles: string[], status: string, updated_at: string }` |
+| **Response `404`** | `{ error: "NOT_FOUND", message: "Recurso nao encontrado" }` |
+| **Headers resposta** | `Cache-Control: no-store` |
+
+**Criterios de aceite**
+- [ ] Lanca `NotFoundError` para usuario nao encontrado
+- [ ] Bloqueio chama `sessionRepository.invalidateAllForUser`
+- [ ] Desbloqueio NAO chama `invalidateAllForUser`
+- [ ] Status atualizado no banco
+- [ ] No bloqueio: TODAS as sessoes do usuario ficam inativas (testar com multiplas sessoes)
+- [ ] Testes unitarios (verifica chamada ao session repo) + integracao (verifica sessoes inativas no banco)
+
+**Arquivos**: `src/user/services/update-status.usecase.ts`
+**Testes**: `src/user/__tests__/unit/update-status.usecase.test.ts`, `src/user/__tests__/integration/update-status.usecase.integration.test.ts`
+
+---
+
+##### T21: Use Case — GetUser
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T04, T10, T13
+- **Desbloqueia**: T27
+
+**Descricao tecnica**
+Consulta de usuario por UUID com isolamento de dados (STORY-005, RN-019).
+
+**Fluxo**: recebe `{targetUserId, requestingUserId, requestingUserRoles}` → ABAC: se nao admin E targetUserId != requestingUserId → 403 → busca user → se nao encontrado → 404 → retorna
+
+**Contrato de API**
+
+| | |
+|---|---|
+| **Metodo/Rota** | `GET /v1/users/:id` |
+| **Autenticacao** | Bearer token (admin: qualquer user; non-admin: apenas proprio) |
+| **Response `200`** | `{ id: string, name: string, email: string, roles: string[], status: string, created_at: string, updated_at: string }` |
+| **Response `403`** | `{ error: "FORBIDDEN", message: "Acesso negado" }` |
+| **Response `404`** | `{ error: "NOT_FOUND", message: "Recurso nao encontrado" }` |
+| **Headers resposta** | `Cache-Control: no-store` |
+
+**Criterios de aceite**
+- [ ] Admin pode consultar qualquer usuario
+- [ ] Non-admin pode consultar apenas seus proprios dados
+- [ ] Non-admin acessando outro usuario recebe 403 — mensagem: "Acesso negado"
+- [ ] Usuario nao encontrado retorna 404
+- [ ] Testes unitarios cobrindo branches de ABAC
+
+**Arquivos**: `src/user/services/get-user.usecase.ts`
+**Teste**: `src/user/__tests__/unit/get-user.usecase.test.ts`
+
+---
+
+##### T22: Use Case — ListUsers
+
+- **Complexidade**: M
+- **Estimativa**: 1 dia-dev
+- **Depende de**: T10, T13
+- **Desbloqueia**: T27
+
+**Descricao tecnica**
+Listagem paginada com filtros (FDD secao 5, admin only).
+
+**Fluxo**: recebe `{page, perPage, role?, status?, name?}` → defaults: page=1, perPage=20, max perPage=100 → delega ao repo → retorna resultado paginado
+
+**Contrato de API**
+
+| | |
+|---|---|
+| **Metodo/Rota** | `GET /v1/users` |
+| **Autenticacao** | Bearer token (papel: admin) |
+| **Query params** | `page` (int, default 1), `per_page` (int, default 20, max 100), `role` (string, opcional), `status` (string, opcional), `name` (string, busca parcial, opcional) |
+| **Response `200`** | `{ data: [{ id, name, email, roles, status, created_at, updated_at }], total: number, page: number, per_page: number }` |
+| **Headers resposta** | `Cache-Control: no-store` |
+
+**Criterios de aceite**
+- [ ] Default page=1, perPage=20
+- [ ] perPage limitado a max 100
+- [ ] Filtros por role, status, name funcionam
+- [ ] Paginacao correta (total, page, per_page no response)
+- [ ] Testes unitarios (defaults, caps) + integracao (filtros, paginacao real)
+
+**Arquivos**: `src/user/services/list-users.usecase.ts`
+**Testes**: `src/user/__tests__/unit/list-users.usecase.test.ts`, `src/user/__tests__/integration/list-users.usecase.integration.test.ts`
+
+---
+
+#### Fase 5: Auth Infrastructure
+
+##### T23: Auth Middleware (JWT + Sessao Server-Side)
+
+- **Complexidade**: M
+- **Estimativa**: 1 dia-dev
+- **Depende de**: T04, T14
+- **Desbloqueia**: T26, T27
+- **Paralelizavel com**: T15-T22
+
+**Descricao tecnica**
+Middleware que valida JWT e verifica sessao ativa no banco a CADA requisicao autenticada (ADR-004).
+
+**Fluxo**: extrai header `Authorization: Bearer <token>` → verifica JWT (jsonwebtoken.verify) → extrai sessionId do payload → consulta `sessionRepository.findActiveByUuid(sessionId)` → se sessao invalida/inativa: 401 → popula `req.user = { userId, roles, sessionId }` → `next()`
+
+**Type augmentation** para Express Request:
+```typescript
+declare global {
+  namespace Express {
+    interface Request {
+      user?: { userId: string; roles: string[]; sessionId: string; }
+    }
+  }
+}
+```
+
+**Criterios de aceite**
+- [ ] Rejeita requisicao sem header Authorization (401)
+- [ ] Rejeita token malformado (401)
+- [ ] Rejeita token expirado (401)
+- [ ] Rejeita sessao inativa no banco (401) — garante zero-delay no bloqueio
+- [ ] `req.user` populado corretamente
+- [ ] Testado via E2E na fase 6
+
+**Arquivos**: `src/shared/middleware/auth.middleware.ts`, `src/shared/types/express.d.ts`
+
+---
+
+##### T24: RBAC Middleware
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T04
+- **Desbloqueia**: T27
+- **Paralelizavel com**: T23
+
+**Descricao tecnica**
+Factory de middleware que verifica se `req.user.roles` contem ao menos um dos papeis requeridos.
+
+**Uso**: `requireRoles('admin')` → retorna middleware que lanca `ForbiddenError("Acesso negado")` se nao autorizado.
+
+**Criterios de aceite**
+- [ ] Rejeita usuario sem papel requerido (403)
+- [ ] Aceita usuario com ao menos um papel correspondente
+- [ ] Testado via E2E na fase 6
+
+**Arquivo**: `src/shared/middleware/rbac.middleware.ts`
+
+---
+
+##### T25: Cache-Control Middleware
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: nenhuma
+- **Paralelizavel com**: qualquer task
+
+**Descricao tecnica**
+Middleware global que adiciona `Cache-Control: no-store` a todas as responses (FDD requisito de headers).
+
+**Criterios de aceite**
+- [ ] Todas as responses incluem header `Cache-Control: no-store`
+- [ ] Registrado como middleware global em `app.ts`
+
+**Arquivos**: `src/shared/middleware/no-cache.middleware.ts`, `src/app.ts`
+
+---
+
+#### Fase 6: HTTP Layer
+
+##### T26: DI Container Wiring completo + Auth Controllers
+
+- **Complexidade**: M
+- **Estimativa**: 1.5 dia-dev
+- **Depende de**: T07, T13, T14, T15-T18, T23
+- **Desbloqueia**: T28, T29
+
+**Descricao tecnica**
+Finalizar bindings no InversifyJS e criar controllers de autenticacao.
+
+**DI bindings** (em `src/user/container/index.ts`):
+- Repositories: singleton via `toDynamicValue`
+- Use cases: transient via `toDynamicValue` injetando repos do container
+
+**Controllers** (em `src/user/controllers/auth.controller.ts`):
+- `POST /v1/auth/login` — publico, delega para LoginUseCase
+- `POST /v1/auth/refresh` — publico, delega para RefreshTokenUseCase
+- `POST /v1/auth/logout` — autenticado (auth middleware), delega para LogoutUseCase, retorna 204
+
+**Criterios de aceite**
+- [ ] Container resolve todos os types sem erro
+- [ ] Teste de compilacao do container (unit test que verifica `container.get()` para cada symbol)
+- [ ] Login E2E: credenciais validas → 200 com tokens; invalidas → 401 mensagem generica; bloqueado → 403
+- [ ] Refresh E2E: token valido → 200 novos tokens; invalido → 401
+- [ ] Logout E2E: token valido → 204; proxima requisicao com mesmo token → 401
+- [ ] Todas as responses com `Cache-Control: no-store`
+
+**Arquivos**: `src/user/container/index.ts`, `src/shared/container.ts`, `src/user/controllers/auth.controller.ts`, `src/app.ts`
+**Testes**: `src/user/__tests__/unit/container.test.ts`, `src/user/__tests__/e2e/auth-routes.e2e.test.ts`
+
+---
+
+##### T27: User CRUD Controllers
+
+- **Complexidade**: M
+- **Estimativa**: 1.5 dia-dev
+- **Depende de**: T15, T19-T22, T23, T24, T26
+- **Desbloqueia**: T28, T29, T30, T31
+
+**Descricao tecnica**
+Controllers para todos os endpoints de gestao de usuarios.
+
+**Rotas** (em `src/user/controllers/user.controller.ts`):
+- `POST /v1/users` — admin, auth + RBAC middleware, delega CreateUserUseCase, retorna 201
+- `PATCH /v1/users/:id/roles` — admin, auth + RBAC, delega UpdateRolesUseCase, retorna 200
+- `PATCH /v1/users/:id/status` — admin, auth + RBAC, delega UpdateStatusUseCase, retorna 200
+- `GET /v1/users/:id` — autenticado (admin ou proprio), auth middleware, delega GetUserUseCase, retorna 200
+- `GET /v1/users` — admin, auth + RBAC, delega ListUsersUseCase, retorna 200
+
+**Criterios de aceite (E2E)**
+- [ ] POST /v1/users: 201 sucesso, 409 email duplicado, 422 senha fraca (com details), 422 sem roles, 401 sem auth, 403 sem admin
+- [ ] PATCH roles: 200 sucesso, 404 user nao encontrado, 422 roles vazio, 401 sem auth, 403 sem admin
+- [ ] PATCH status: 200 sucesso, 404 user nao encontrado, 401 sem auth, 403 sem admin
+- [ ] GET /v1/users/:id: 200 para admin, 200 para proprio user, 403 para outro user non-admin, 404 nao encontrado
+- [ ] GET /v1/users: 200 com paginacao, filtros funcionam, 401 sem auth, 403 sem admin
+- [ ] Nenhuma response contem password ou passwordHash
+- [ ] Todas as responses com `Cache-Control: no-store`
+
+**Arquivos**: `src/user/controllers/user.controller.ts`, `src/app.ts`
+**Teste**: `src/user/__tests__/e2e/user-routes.e2e.test.ts`
+
+---
+
+##### T28: Module Index e Integracao Final no App
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T26, T27
+- **Desbloqueia**: T29, T30, T31
+
+**Descricao tecnica**
+Entry point do modulo User e integracao final no `app.ts`.
+
+**Ordem de middleware em `app.ts`:**
+1. `express.json()`
+2. No-cache middleware
+3. Auth routes (publicas)
+4. User routes (com auth/RBAC)
+5. Error handler (ultimo)
+
+**`server.ts` final:** DataSource.initialize() → load DI container → app.listen()
+
+**Criterios de aceite**
+- [ ] App boots completo sem erro
+- [ ] Todos os endpoints acessiveis
+- [ ] `docker compose up` roda o stack completo
+
+**Arquivos**: `src/user/index.ts`, `src/app.ts`, `src/server.ts`
+
+---
+
+#### Fase 7: Verificacao E2E e Observabilidade
+
+##### T29: E2E — Isolamento de dados (STORY-005)
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T28
+- **Paralelizavel com**: T30
+
+**Descricao tecnica**
+Testes E2E dedicados para verificar ABAC/ACL conforme STORY-005 e RN-019.
+
+**Criterios de aceite**
+- [ ] Student acessa proprio perfil → 200
+- [ ] Student acessa perfil de outro → 403 "Acesso negado"
+- [ ] Admin acessa qualquer perfil → 200
+- [ ] Student nao acessa GET /v1/users (lista) → 403
+- [ ] Student nao acessa POST /v1/users → 403
+- [ ] Student nao acessa PATCH roles/status → 403
+
+**Teste**: `src/user/__tests__/e2e/data-isolation.e2e.test.ts`
+
+---
+
+##### T30: E2E — Fluxo completo de bloqueio (STORY-003)
+
+- **Complexidade**: P
+- **Estimativa**: 0.5 dia-dev
+- **Depende de**: T28
+- **Paralelizavel com**: T29
+
+**Descricao tecnica**
+Testes E2E dedicados para o fluxo de bloqueio/desbloqueio (criterios de aceite 13-14 do FDD secao 9).
+
+**Criterios de aceite**
+- [ ] Criar user → login → bloquear → proxima requisicao do user retorna 401 (zero delay)
+- [ ] Criar user → login com multiplas sessoes → bloquear → TODAS as sessoes invalidadas
+- [ ] User bloqueado nao consegue fazer login (403)
+- [ ] Desbloquear user → user consegue fazer login novamente
+
+**Teste**: `src/user/__tests__/e2e/block-flow.e2e.test.ts`
+
+---
+
+##### T31: Logging estruturado JSON
+
+- **Complexidade**: M
+- **Estimativa**: 1 dia-dev
+- **Depende de**: T28
+
+**Descricao tecnica**
+Substituir `console.log` por logging estruturado conforme FDD secao 7.
+
+**Formato JSON**: `{ timestamp, level, request_id, user_id, module: "user", action, message }`
+
+**Actions a logar:**
+- `login_success`: `{ user_id, roles }`
+- `login_failure`: `{ reason: "invalid_credentials" | "blocked_account" }` (SEM email — PII)
+- `user_created`: `{ target_user_id, roles, created_by }`
+- `user_blocked`: `{ target_user_id, sessions_invalidated, blocked_by }`
+- `session_invalidated`: `{ target_user_id, reason: "block" | "logout" }`
+- `access_denied`: `{ target_resource, reason }`
+
+**Inclui middleware de request-id** (gera UUID por requisicao).
+
+**Criterios de aceite**
+- [ ] Todos os logs em formato JSON
+- [ ] Request ID propagado em todo o ciclo de vida da requisicao
+- [ ] Dados sensiveis (senha, tokens, email em logs de falha) NUNCA logados
+- [ ] Actions conforme FDD secao 7
+
+**Arquivos**: `src/shared/utils/logger.ts`, `src/shared/middleware/request-id.middleware.ts`, `src/app.ts`, use cases modificados
+
+---
+
+### Checkpoints de validacao
+
+| Apos fase | Validacao | Como verificar |
+|---|---|---|
+| 1 | Deps instaladas, TS compila, DB conecta, container DI carrega | `npm run build`, `docker compose up`, teste manual de conexao |
+| 2 | Entidades de dominio validam todas as regras | `npm run test -- --run src/user/__tests__/unit/` |
+| 3 | Models sincronizam com DB, repos persistem e consultam | `npm run test -- --run src/user/__tests__/integration/` |
+| 4 | Todos os use cases passam testes unit + integration | `npm test` |
+| 5+6 | Endpoints respondem corretamente, auth funciona | `npm run test -- --run src/user/__tests__/e2e/` |
+| 7 | Fluxos completos de bloqueio e isolamento verificados | Testes E2E dedicados |
+
+---
+
+### Riscos de implementacao
+
+| Risco | Probabilidade | Impacto | Mitigacao | Task afetada |
+|---|---|---|---|---|
+| `erasableSyntaxOnly` conflita com decorators TypeORM | Alta | Bloqueia todos os models | Remover flag e adicionar `experimentalDecorators` + `emitDecoratorMetadata` | T01 |
+| argon2 nao compila no `node:25.6.0-slim` | Media | Bloqueia hash de senha | Adicionar build tools ao Dockerfile ou usar imagem nao-slim | T01 |
+| Lookup de sessao no DB a cada request | Media | Latencia em todos os endpoints | Indice em `sessions(uuid, active)`, query leve por PK | T12, T23 |
+| Express 5 async error handling | Baixa | Erros nao chegam ao error handler | Express 5 captura erros async nativamente; manter try/catch nos controllers | T26, T27 |
+| Shape de erro FDD vs regra error-handler.md | Media | Inconsistencia na API | Seguir FDD (flat shape), atualizar regra | T05 |
+
+---
+
+### Observacoes finais
+
+1. **Metricas e tracing (OpenTelemetry)** sao listados no FDD mas diferidos para apos o modulo estar funcional. O logging estruturado (T31) fornece observabilidade imediata.
+2. **A regra `error-handler.md`** precisa ser atualizada para refletir a shape flat do FDD: `{ error, message, details }` em vez de `{ error: { code, message } }`.
+3. **Testes sao parte de cada task**, nao tasks separadas. Cada task so esta completa quando seus testes passam.
+4. **O campo `id` nas responses da API e o `uuid` interno** — nunca expor o `id` auto-increment.

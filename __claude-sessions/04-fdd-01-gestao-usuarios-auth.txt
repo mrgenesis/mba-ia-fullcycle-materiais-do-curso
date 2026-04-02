@@ -1,0 +1,697 @@
+╭─── Claude Code v2.1.83 ──────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting        │
+│              Welcome back Luiz Carlos!             │ started                 │
+│                                                    │ ✔ Run /init to create … │
+│                       ▐▛███▜▌                      │ ─────────────────────── │
+│                      ▝▜█████▛▘                     │ Recent activity         │
+│                        ▘▘ ▝▝                       │ No recent activity      │
+│       Opus 4.6 (1M context) · Claude Max ·         │                         │
+│       argentinaluiz@gmail.com's Organization       │                         │
+│    ~/ti/fullcycle-mba-ia/talks/dev-workflow-test   │                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+❯ /clear                                                                        
+  ⎿  (no content)
+
+❯ /fdd-creator do epico @docs/epicos/epic-001-usuarios.md                       
+  ⎿  Read docs/epicos/epic-001-usuarios.md (79 lines)
+
+● Let me first gather the technical context from the project docs to inform the
+  interview.
+
+  Searched for 1 pattern, read 4 files (ctrl+o to expand)
+
+● Olá! Eu sou um assistente de criação de FDD.
+
+  Vou te fazer perguntas objetivas sobre contexto técnico, objetivos, escopo,
+  fluxos, contratos públicos, erros/fallback, observabilidade, dependências,
+  critérios de aceite e riscos.
+
+  No fim, entrego o FDD no formato padrão e, se quiser, também exporto um JSON 
+  estruturado.
+
+  ---
+  Já li o épico EPIC-001: Gestão de Usuários e Autenticação e os documentos de
+  contexto (HLD, domain-context, ADR-004, ADR-005). O épico cobre 5 stories:
+
+  1. STORY-001 - Cadastro de novo usuário (Admin cria usuários com nome, email,
+  senha, papéis)
+  2. STORY-002 - Gestão de múltiplos papéis simultâneos
+  3. STORY-003 - Bloqueio e desbloqueio de contas
+  4. STORY-004 - Autenticação (login com email/senha, JWT com sessão
+  server-side)
+  5. STORY-005 - Isolamento de dados por papel e contexto
+
+  Vamos começar pela Etapa 1: Contexto e motivação técnica.
+
+  O módulo User é descrito no HLD como "módulo raiz" sem dependências,
+  responsável por autenticação (JWT + sessão no banco, ADR-004) e autorização
+  (RBAC + ABAC + ACL, ADR-005). A motivação é garantir acesso seguro com
+  controle granular de papéis.
+
+  Minha pergunta: Este FDD deve cobrir o épico inteiro (todas as 5 stories) como
+   uma única feature, ou você prefere FDDs separados por story?
+
+✻ Sautéed for 33s
+
+❯ sim, cobrir o epico inteiro                                                   
+
+● Perfeito. Então o FDD cobrirá o épico inteiro como uma feature unificada:
+  Gestão de Usuários e Autenticação.
+
+  Vou consolidar o contexto técnico que já extraí dos documentos:
+
+  Resumo do contexto e motivação técnica:
+  - O módulo User é o módulo raiz da plataforma, sem dependências externas a
+  outros módulos.
+  - Resolve o problema de controle de acesso granular para 4 papéis (aluno,
+  professor, tutor, admin) com autorização contextual.
+  - Autenticação via JWT com validação server-side (sessão no banco), conforme
+  ADR-004, permitindo invalidação imediata (bloqueio).
+  - Autorização em 3 camadas: RBAC (middleware), ABAC e ACL (use cases),
+  conforme ADR-005.
+  - Atores: Admin (gestão de usuários/papéis/bloqueio), Usuário de qualquer
+  papel (login), Aluno (isolamento de dados).
+  - Stack: Express.js 5 + TypeScript (ESM), PostgreSQL 17, arquitetura
+  hexagonal.
+
+  Confirma este contexto ou gostaria de ajustar/complementar algo?
+
+❯ confirmo                                                                      
+
+● Ótimo. Vamos para a Etapa 2: Objetivos técnicos.
+
+  Com base no épico e no HLD, identifico os seguintes objetivos técnicos
+  mensuráveis:
+
+  1. CRUD completo de usuários com validação de nome, email (único, formato
+  válido), senha (política: min 8 chars, 1 maiúscula, 1 minúscula, 1 número, 1
+  símbolo) e ao menos 1 papel atribuído (RN-023).
+  2. Autenticação via JWT com sessão server-side emitindo access token + refresh
+   token, com verificação de sessão ativa no banco a cada requisição (ADR-004).
+  3. Invalidação imediata de sessão ao bloquear usuário, garantindo que login
+  seja impedido instantaneamente.
+  4. Autorização em camadas com RBAC no middleware (verificação de papel) e
+  ABAC/ACL nos use cases (verificação contextual e por recurso), conforme
+  ADR-005.
+  5. Isolamento de dados garantindo que aluno só acesse seus próprios
+  dados/matrículas (RN-019), com negação de acesso via URL direta.
+  6. SLA de performance conforme HLD: p95 < 200ms leitura, < 500ms escrita nos
+  endpoints de Auth e Users.
+  7. Soft delete apenas para dados de usuário (RN-022), sem exclusão física.
+
+  Esses objetivos estão completos ou gostaria de adicionar/remover algum?
+
+❯ estão completos                                                               
+  ⎿  ⧉ Selected 1 lines from .claude/skills/fdd-creator/SKILL.md in Visual 
+     Studio Code - Insiders
+
+● Ótimo. Vamos para a Etapa 3: Escopo e exclusões.
+
+  Incluído nesta entrega:
+  - Entidade User (nome, email, senha com hash, papéis, situação
+  ativo/bloqueado)
+  - Endpoint de criação de usuário (Admin)
+  - Endpoint de edição de papéis (adicionar/remover, Admin)
+  - Endpoint de bloqueio e desbloqueio de usuário (Admin)
+  - Endpoint de login (email + senha) com emissão de access token + refresh
+  token
+  - Endpoint de refresh token
+  - Endpoint de logout (invalidação de sessão)
+  - Tabela de sessões no PostgreSQL para validação server-side
+  - Middleware de autenticação (validação JWT + sessão ativa)
+  - Middleware de autorização RBAC (verificação de papel por endpoint)
+  - Lógica ABAC/ACL nos use cases para isolamento de dados (RN-019)
+  - Hash de senha com bcrypt ou argon2
+  - Soft delete para usuários (RN-022)
+
+  Excluído desta entrega:
+  - Tela/frontend (apenas API REST)
+  - Recuperação de senha / fluxo de "esqueci minha senha"
+  - Cadastro self-service (apenas Admin cria usuários)
+  - Autenticação via provedores externos (OAuth/SSO)
+  - Vinculação de tutor a cursos (pertence ao módulo Course/CourseTutor)
+  - Verificação de email (confirmação por link)
+  - Rate limiting (tratado como preocupação transversal, fora deste módulo)
+
+  Este escopo está correto ou gostaria de ajustar algum item?
+
+❯ correto                                                                       
+
+● Ótimo. Vamos para a Etapa 4: Fluxos detalhados e diagramas.
+
+  Vou detalhar o fluxo principal primeiro. Começando pelo mais central:
+
+  Fluxo 1: Cadastro de usuário (Admin)
+  1. Admin autenticado envia POST com nome, email, senha e papéis
+  2. Middleware de autenticação valida JWT + sessão ativa no banco
+  3. Middleware RBAC verifica que o usuário tem papel "admin"
+  4. Controller repassa para o use case CreateUser
+  5. Use case valida: nome (max 100 chars), email (formato válido), senha
+  (política), ao menos 1 papel válido
+  6. Use case verifica unicidade do email no banco
+  7. Use case gera hash da senha (bcrypt/argon2)
+  8. Use case persiste o usuário com situação "ativo" e papéis atribuídos
+  9. Retorna 201 com dados do usuário (sem senha)
+
+  Fluxo 2: Login (qualquer usuário)
+  1. Usuário envia POST com email e senha
+  2. Use case busca usuário por email
+  3. Se não encontrado, retorna erro genérico (sem revelar se email existe)
+  4. Se encontrado, verifica hash da senha
+  5. Se senha incorreta, retorna mesmo erro genérico
+  6. Se conta bloqueada, retorna erro de conta bloqueada
+  7. Se tudo válido, cria sessão no banco e emite access token + refresh token
+  8. Retorna 200 com tokens
+
+  Fluxo 3: Gestão de papéis (Admin)
+  1. Admin autenticado envia PATCH com papéis a adicionar/remover
+  2. Middlewares de autenticação e RBAC executam
+  3. Use case valida que ao menos 1 papel restará após a operação
+  4. Use case atualiza papéis do usuário
+  5. Retorna 200 com dados atualizados
+
+  Fluxo 4: Bloqueio/desbloqueio (Admin)
+  1. Admin autenticado envia PATCH com nova situação (bloqueado/ativo)
+  2. Middlewares de autenticação e RBAC executam
+  3. Use case atualiza situação do usuário
+  4. Se bloqueio: use case invalida todas as sessões ativas do usuário
+  5. Retorna 200 com dados atualizados
+
+  Fluxo 5: Isolamento de dados (Aluno)
+  1. Aluno autenticado faz GET em recurso próprio (ex: suas matrículas)
+  2. Middlewares de autenticação e RBAC executam
+  3. Use case aplica filtro ACL: só retorna dados do próprio usuário
+  4. Se tentativa de acesso via URL a recurso de outro aluno, retorna 403
+
+  Fluxos alternativos e exceções:
+  - Email duplicado no cadastro: rejeita com 409 Conflict
+  - Senha fora da política: rejeita com 422 e lista de critérios não atendidos
+  - Nenhum papel selecionado: rejeita com 422
+  - Tentativa de remover último papel: rejeita com 422
+  - Token expirado: retorna 401, cliente usa refresh token
+  - Refresh token inválido/expirado: retorna 401, cliente precisa fazer login
+  novamente
+  - Sessão invalidada (bloqueio): retorna 401 na próxima requisição
+
+  Gostaria de algum diagrama de sequência para algum desses fluxos, ou os fluxos
+   estão completos para seguir em frente?
+
+❯ sim                                                                           
+
+● Preciso de uma clarificação: o "sim" se refere a gerar diagramas de sequência
+  ou a seguir em frente com os fluxos como estão?
+
+❯ gerar o diagrama de sequência e seguir em frente                              
+
+● Aqui estão os diagramas de sequência dos fluxos principais:
+
+  Diagrama 1: Cadastro de usuário (Admin)
+  sequenceDiagram
+      participant Admin
+      participant AuthMW as Middleware Auth
+      participant RBACMW as Middleware RBAC
+      participant Controller
+      participant UseCase as CreateUser UC
+      participant Repo as UserRepository
+      participant DB as PostgreSQL
+
+      Admin->>AuthMW: POST /v1/users (JWT)
+      AuthMW->>DB: Verifica sessão ativa
+      DB-->>AuthMW: Sessão válida
+      AuthMW->>RBACMW: Usuário autenticado
+      RBACMW->>RBACMW: Verifica papel "admin"
+      RBACMW->>Controller: Autorizado
+      Controller->>UseCase: execute(name, email, password, roles)
+      UseCase->>UseCase: Valida campos (nome, email, senha, papéis)
+      UseCase->>Repo: findByEmail(email)
+      Repo->>DB: SELECT WHERE email = ?
+      DB-->>Repo: null (não existe)
+      Repo-->>UseCase: null
+      UseCase->>UseCase: Hash da senha (bcrypt)
+      UseCase->>Repo: save(user)
+      Repo->>DB: INSERT user + roles
+      DB-->>Repo: OK
+      Repo-->>UseCase: User criado
+      UseCase-->>Controller: User (sem senha)
+      Controller-->>Admin: 201 Created
+
+  Diagrama 2: Login
+  sequenceDiagram
+      participant User as Usuário
+      participant Controller
+      participant UseCase as Login UC
+      participant Repo as UserRepository
+      participant SessionRepo as SessionRepository
+      participant DB as PostgreSQL
+
+      User->>Controller: POST /v1/auth/login (email, senha)
+      Controller->>UseCase: execute(email, password)
+      UseCase->>Repo: findByEmail(email)
+      Repo->>DB: SELECT WHERE email = ?
+      DB-->>Repo: User encontrado
+      Repo-->>UseCase: User
+      UseCase->>UseCase: Verifica hash da senha
+      UseCase->>UseCase: Verifica situação != bloqueado
+      UseCase->>SessionRepo: create(userId)
+      SessionRepo->>DB: INSERT session
+      DB-->>SessionRepo: OK
+      SessionRepo-->>UseCase: Session
+      UseCase->>UseCase: Gera access token + refresh token
+      UseCase-->>Controller: Tokens
+      Controller-->>User: 200 OK (access_token, refresh_token)
+
+  Diagrama 3: Bloqueio com invalidação de sessões
+  sequenceDiagram
+      participant Admin
+      participant AuthMW as Middleware Auth
+      participant RBACMW as Middleware RBAC
+      participant Controller
+      participant UseCase as BlockUser UC
+      participant UserRepo as UserRepository
+      participant SessionRepo as SessionRepository
+      participant DB as PostgreSQL
+
+      Admin->>AuthMW: PATCH /v1/users/:id/status (JWT)
+      AuthMW->>DB: Verifica sessão ativa
+      DB-->>AuthMW: Sessão válida
+      AuthMW->>RBACMW: Usuário autenticado
+      RBACMW->>RBACMW: Verifica papel "admin"
+      RBACMW->>Controller: Autorizado
+      Controller->>UseCase: execute(userId, "bloqueado")
+      UseCase->>UserRepo: updateStatus(userId, "bloqueado")
+      UserRepo->>DB: UPDATE user SET situação = bloqueado
+      DB-->>UserRepo: OK
+      UseCase->>SessionRepo: invalidateAll(userId)
+      SessionRepo->>DB: UPDATE sessions SET active = false
+      DB-->>SessionRepo: OK
+      UseCase-->>Controller: User atualizado
+      Controller-->>Admin: 200 OK
+
+  Diagrama 4: Requisição autenticada com isolamento (Aluno)
+  sequenceDiagram
+      participant Aluno
+      participant AuthMW as Middleware Auth
+      participant RBACMW as Middleware RBAC
+      participant Controller
+      participant UseCase as GetEnrollments UC
+      participant Repo as EnrollmentRepository
+      participant DB as PostgreSQL
+
+      Aluno->>AuthMW: GET /v1/enrollments (JWT)
+      AuthMW->>DB: Verifica sessão ativa
+      DB-->>AuthMW: Sessão válida
+      AuthMW->>RBACMW: Usuário autenticado (userId)
+      RBACMW->>RBACMW: Verifica papel "aluno"
+      RBACMW->>Controller: Autorizado
+      Controller->>UseCase: execute(userId)
+      UseCase->>Repo: findByUserId(userId)
+      Repo->>DB: SELECT WHERE user_id = userId
+      DB-->>Repo: Matrículas do aluno
+      Repo-->>UseCase: Enrollments[]
+      UseCase-->>Controller: Enrollments[]
+      Controller-->>Aluno: 200 OK
+
+  ---
+  Agora vamos para a Etapa 5: Contratos públicos (assinaturas, endpoints, 
+  headers, exemplos).
+
+  Primeira pergunta: Para o hash de senha, você prefere bcrypt ou argon2? O HLD
+  menciona ambos como opção. Bcrypt é mais maduro no ecossistema Node.js; argon2
+   é mais moderno e resistente a ataques de GPU, mas requer binding nativo.
+
+❯ argon2                                                                        
+
+● Anotado: argon2 para hash de senha.
+
+  Próxima pergunta: Qual a estratégia de expiração dos tokens?
+
+  Sugiro como hipótese:
+  1. Access token: 15 minutos (curto, reduz janela de uso indevido)
+  2. Refresh token: 7 dias (permite sessões longas sem relogin constante)
+
+  Esses valores estão adequados ou prefere outros tempos?
+
+❯ 15 minutos                                                                    
+
+● Entendi, 15 minutos para o access token. E para o refresh token, 7 dias está
+  adequado ou prefere outro valor?
+
+❯ 7 dias                                                                        
+
+● Anotado. Agora vou consolidar os contratos públicos do módulo User:
+
+  ---
+  1. POST /v1/auth/login
+  - Público (sem autenticação)
+  - Request: { "email": "string", "password": "string" }
+  - Response 200: { "access_token": "string", "refresh_token": "string", 
+  "expires_in": 900 }
+  - Erros: 401 (credenciais inválidas), 403 (conta bloqueada)
+
+  2. POST /v1/auth/refresh
+  - Público (sem autenticação, usa refresh token no body)
+  - Request: { "refresh_token": "string" }
+  - Response 200: { "access_token": "string", "refresh_token": "string", 
+  "expires_in": 900 }
+  - Erros: 401 (refresh token inválido/expirado)
+
+  3. POST /v1/auth/logout
+  - Autenticado (qualquer papel)
+  - Header: Authorization: Bearer <access_token>
+  - Response: 204 No Content
+  - Efeito: invalida a sessão no banco
+
+  4. POST /v1/users
+  - Autenticado, papel: admin
+  - Request: { "name": "string", "email": "string", "password": "string", 
+  "roles": ["aluno", "professor"] }
+  - Response 201: { "id": "uuid", "name": "string", "email": "string", "roles": 
+  ["aluno", "professor"], "status": "ativo", "created_at": "ISO8601" }
+  - Erros: 409 (email duplicado), 422 (validação: senha, papéis, nome)
+
+  5. PATCH /v1/users/:id/roles
+  - Autenticado, papel: admin
+  - Request: { "roles": ["aluno", "professor", "tutor"] }
+  - Response 200: { "id": "uuid", "name": "string", "email": "string", "roles": 
+  [...], "status": "string", "updated_at": "ISO8601" }
+  - Erros: 404 (usuário não encontrado), 422 (lista vazia de papéis)
+
+  6. PATCH /v1/users/:id/status
+  - Autenticado, papel: admin
+  - Request: { "status": "bloqueado" | "ativo" }
+  - Response 200: { "id": "uuid", "name": "string", "email": "string", "roles": 
+  [...], "status": "bloqueado", "updated_at": "ISO8601" }
+  - Erros: 404 (usuário não encontrado)
+
+  7. GET /v1/users/:id
+  - Autenticado, papel: admin (qualquer usuário) ou próprio usuário (seus dados)
+  - Response 200: { "id": "uuid", "name": "string", "email": "string", "roles": 
+  [...], "status": "string", "created_at": "ISO8601", "updated_at": "ISO8601" }
+  - Erros: 403 (acesso negado), 404 (não encontrado)
+
+  8. GET /v1/users
+  - Autenticado, papel: admin
+  - Response 200: { "data": [User[]], "total": number, "page": number, 
+  "per_page": number }
+  - Suporta paginação e filtros (por papel, situação, nome)
+
+  ---
+  Headers comuns:
+  - Authorization: Bearer <access_token> (endpoints autenticados)
+  - Content-Type: application/json
+  - Respostas incluem Cache-Control: no-store (dados sensíveis de usuário, sem
+  cache)
+
+  Limites (conforme HLD):
+  - Rate limiting: 100 req/s autenticado, 20 req/s não autenticado
+  - Payload máximo: 1 MB
+  - SLA: p95 < 200ms leitura, < 500ms escrita
+
+  Esses contratos estão completos ou gostaria de ajustar/adicionar algum 
+  endpoint?
+
+❯ sim                                                                           
+
+● Ótimo. Vamos para a Etapa 6: Erros, exceções e fallback.
+
+  Matriz de erros previstos:
+
+  ┌─────────────────────────┬───────────────────┬───────────────────────────┐
+  │        Condição         │    HTTP Status    │        Tratamento         │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Email duplicado no      │ 409 Conflict      │ Mensagem: "Email já está  │
+  │ cadastro                │                   │ em uso"                   │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Senha fora da política  │ 422 Unprocessable │ Lista de critérios não    │
+  │                         │  Entity           │ atendidos                 │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Nenhum papel            │ 422 Unprocessable │ Mensagem: "Ao menos um    │
+  │ selecionado             │  Entity           │ papel é obrigatório"      │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Remoção do último papel │ 422 Unprocessable │ Mensagem: "Usuário deve   │
+  │                         │  Entity           │ ter ao menos um papel"    │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Nome vazio ou acima de  │ 422 Unprocessable │ Mensagem de validação     │
+  │ 100 chars               │  Entity           │ específica                │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Email formato inválido  │ 422 Unprocessable │ Mensagem de validação     │
+  │                         │  Entity           │ específica                │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Credenciais inválidas   │ 401 Unauthorized  │ Mensagem genérica (sem    │
+  │ (login)                 │                   │ revelar se email existe)  │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Conta bloqueada (login) │ 403 Forbidden     │ Mensagem: "Conta          │
+  │                         │                   │ bloqueada"                │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Token JWT expirado      │ 401 Unauthorized  │ Cliente deve usar refresh │
+  │                         │                   │  token                    │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Refresh token           │ 401 Unauthorized  │ Cliente deve fazer login  │
+  │ inválido/expirado       │                   │ novamente                 │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Sessão invalidada       │ 401 Unauthorized  │ Próxima requisição falha  │
+  │ (bloqueio)              │                   │ imediatamente             │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Acesso a recurso de     │ 403 Forbidden     │ Mensagem: "Acesso negado" │
+  │ outro usuário           │                   │                           │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Usuário não encontrado  │ 404 Not Found     │ Mensagem: "Recurso não    │
+  │                         │                   │ encontrado"               │
+  ├─────────────────────────┼───────────────────┼───────────────────────────┤
+  │ Papel inválido (fora    │ 422 Unprocessable │ Mensagem: "Papel          │
+  │ dos 4 aceitos)          │  Entity           │ inválido"                 │
+  └─────────────────────────┴───────────────────┴───────────────────────────┘
+
+  Estratégias de resiliência:
+  - Timeout de 5s para queries ao banco (evitar conexões penduradas)
+  - Connection pooling via PgBouncer (conforme HLD)
+  - Sem retry automático para operações de escrita (idempotência não garantida)
+  - Retry com backoff para leitura em caso de falha transitória do banco (max 2
+  retries)
+
+  Política de fallback:
+  - Se o banco estiver indisponível, todos os endpoints autenticados retornam
+  503 Service Unavailable (dependência da validação de sessão)
+  - Sem fallback de cache para dados de autenticação (segurança prioritária)
+
+  Invariantes críticos:
+  - Usuário sempre tem ao menos 1 papel
+  - Usuário sempre tem situação (ativo ou bloqueado)
+  - Senha nunca é retornada em responses
+  - Senha sempre armazenada como hash argon2
+  - Bloqueio invalida sessões imediatamente (zero delay)
+
+  Essa matriz está completa ou gostaria de ajustar algo?
+
+❯ continue                                                                      
+
+● Vamos para a Etapa 7: Observabilidade.
+
+  Métricas:
+  - auth.login.total (counter) - total de tentativas de login (tags:
+  success/failure)
+  - auth.login.blocked (counter) - tentativas de login em contas bloqueadas
+  - auth.token.refresh.total (counter) - total de refresh token requests (tags:
+  success/failure)
+  - auth.session.active (gauge) - sessões ativas no banco
+  - users.created.total (counter) - usuários criados
+  - users.blocked.total (counter) - usuários bloqueados
+  - users.endpoint.duration (histogram) - latência por endpoint (tags: method,
+  route, status)
+
+  Logs (JSON estruturado):
+  - Campos padrão: timestamp, level, request_id, user_id, module: "user",
+  action, message
+  - Login bem-sucedido: { action: "login_success", user_id, roles }
+  - Login falho: { action: "login_failure", reason: "invalid_credentials" | 
+  "blocked_account" } (sem logar email para proteger PII)
+  - Usuário criado: { action: "user_created", target_user_id, roles, created_by 
+  }
+  - Usuário bloqueado: { action: "user_blocked", target_user_id, 
+  sessions_invalidated: number, blocked_by }
+  - Sessão invalidada: { action: "session_invalidated", target_user_id, reason: 
+  "block" | "logout" }
+  - Acesso negado: { action: "access_denied", target_resource, reason }
+
+  Tracing (OpenTelemetry):
+  - Spans principais:
+    - auth.middleware - validação JWT + consulta sessão
+    - rbac.middleware - verificação de papel
+    - usecase.{create_user|login|block_user|update_roles} - lógica de negócio
+    - repository.user.{find|save|update} - operações no banco
+    - repository.session.{create|invalidate|find} - operações de sessão
+  - Amostragem: 100% em dev, 10% em produção (ajustável)
+  - Dados sensíveis: nunca incluir senha ou tokens em spans/logs
+
+  Dashboards e alertas (planejados):
+  - Alerta: taxa de login falho > 50% em janela de 5 min (possível ataque)
+  - Alerta: latência p95 de /v1/auth/login > 500ms
+  - Alerta: sessões ativas crescendo além do esperado (possível vazamento de
+  sessão)
+
+  Essa seção está adequada ou gostaria de ajustar?
+
+❯ está adequada                                                                 
+
+● Vamos para a Etapa 8: Dependências e compatibilidade.
+
+  ┌────────────────────┬────────────────┬───────────────────────────────────┐
+  │     Componente     │ Versão mínima  │            Observações            │
+  ├────────────────────┼────────────────┼───────────────────────────────────┤
+  │ Node.js            │ 25.x           │ Conforme compose.yaml             │
+  ├────────────────────┼────────────────┼───────────────────────────────────┤
+  │ Express.js         │ 5.x            │ Conforme CLAUDE.md                │
+  ├────────────────────┼────────────────┼───────────────────────────────────┤
+  │ TypeScript         │ 5.x            │ ESM modules, strict mode          │
+  ├────────────────────┼────────────────┼───────────────────────────────────┤
+  │ PostgreSQL         │ 17.x           │ Fonte única de verdade            │
+  ├────────────────────┼────────────────┼───────────────────────────────────┤
+  │ argon2 (npm)       │ 0.40+          │ Binding nativo, hash de senha     │
+  ├────────────────────┼────────────────┼───────────────────────────────────┤
+  │ jsonwebtoken (npm) │ 9.x (hipótese) │ Geração e verificação de JWT      │
+  ├────────────────────┼────────────────┼───────────────────────────────────┤
+  │ PgBouncer          │ 1.x            │ Connection pooling (conforme HLD) │
+  ├────────────────────┼────────────────┼───────────────────────────────────┤
+  │ OpenTelemetry SDK  │ 1.x            │ Tracing distribuído (ADR-007)     │
+  └────────────────────┴────────────────┴───────────────────────────────────┘
+
+  Garantias de compatibilidade:
+  - Módulo User não depende de nenhum outro módulo (módulo raiz)
+  - Outros módulos dependem do User para autenticação/autorização via middleware
+   compartilhado
+  - Contratos de middleware (autenticação e RBAC) são a interface pública para
+  os demais módulos
+  - Versionamento de API via prefixo /v1/
+  - Tabelas de User e Session são exclusivas deste módulo (sem acesso direto por
+   outros módulos)
+
+  Algum ajuste ou dependência que eu tenha omitido?
+
+❯ tudo certo                                                                    
+
+● Vamos para a Etapa 9: Critérios de aceite técnicos.
+
+  1. Usuário criado com nome, email (único), senha (hash argon2) e ao menos 1
+  papel, situação "ativo"
+  2. Tentativa de cadastro com email duplicado retorna 409
+  3. Tentativa de cadastro com senha fora da política retorna 422 com lista de
+  critérios não atendidos
+  4. Tentativa de cadastro sem papel retorna 422
+  5. Login com credenciais válidas e conta ativa retorna access token (15 min) +
+   refresh token (7 dias)
+  6. Login com credenciais inválidas retorna 401 com mensagem genérica (não
+  revela existência do email)
+  7. Login com conta bloqueada retorna 403
+  8. Refresh token válido emite novo par de tokens
+  9. Refresh token expirado/inválido retorna 401
+  10. Logout invalida sessão no banco, próxima requisição com mesmo token
+  retorna 401
+  11. Admin consegue adicionar e remover papéis de um usuário
+  12. Tentativa de remover o último papel retorna 422
+  13. Bloqueio de usuário invalida todas as sessões ativas imediatamente
+  14. Desbloqueio de usuário restaura capacidade de login
+  15. Aluno acessando recurso próprio recebe 200; acessando recurso de outro
+  aluno recebe 403
+  16. Senha nunca aparece em responses, logs ou spans
+  17. Todos os endpoints de leitura com p95 < 200ms
+  18. Todos os endpoints de escrita com p95 < 500ms
+  19. Spans de tracing presentes em todas as camadas (middleware, use case,
+  repository)
+  20. Logs estruturados em JSON com request_id, user_id, module e action em
+  todas as operações
+
+  Esses critérios cobrem o necessário ou gostaria de adicionar/remover algum?
+
+❯ está ok                                                                       
+● Vamos para a última etapa: Etapa 10: Riscos e mitigação.
+
+  Risco 1: Consulta ao banco a cada requisição autenticada (validação de sessão)
+  - Probabilidade: Média
+  - Impacto: Aumento de latência em todos os endpoints autenticados sob alta
+  carga
+  - Mitigação:
+    - Query leve por ID de sessão com índice dedicado
+    - Connection pooling via PgBouncer
+    - Monitorar latência do span auth.middleware via tracing
+  - Plano de contingência: Introduzir cache de sessão em memória (ex: Redis) com
+   TTL curto (30s), aceitando janela de delay no bloqueio
+
+  Risco 2: Ataques de força bruta no endpoint de login
+  - Probabilidade: Alta
+  - Impacto: Comprometimento de contas, sobrecarga no banco (hashing argon2 é
+  CPU-intensivo)
+  - Mitigação:
+    - Rate limiting de 20 req/s para endpoints não autenticados (conforme HLD)
+    - Mensagem genérica no login (não revela se email existe)
+    - Logs de tentativas falhas com alerta em taxa > 50% em 5 min
+  - Plano de contingência: Implementar bloqueio temporário por IP ou por conta
+  após N tentativas falhas
+
+  Risco 3: Vazamento de sessões (sessões órfãs no banco)
+  - Probabilidade: Média
+  - Impacto: Crescimento da tabela de sessões, degradação de queries
+  - Mitigação:
+    - TTL na sessão igual ao refresh token (7 dias)
+    - Job periódico para limpar sessões expiradas
+    - Métrica auth.session.active com alerta de crescimento anômalo
+  - Plano de contingência: Truncar sessões expiradas manualmente; adicionar
+  índice parcial em sessões ativas
+
+  Risco 4: Binding nativo do argon2 causa problemas em diferentes ambientes
+  - Probabilidade: Baixa
+  - Impacto: Falha no build ou deploy em ambientes sem dependências nativas
+  - Mitigação:
+    - Docker como ambiente padrão (dependências controladas)
+    - Testar build no CI com a mesma imagem Docker de produção
+  - Plano de contingência: Fallback para bcrypt (puro JS, sem binding nativo)
+
+  Esses riscos estão completos ou gostaria de adicionar/ajustar algo?
+
+❯ está ok                                                                       
+
+● Vou gerar o FDD completo agora. Primeiro, deixe-me verificar onde salvar o
+  documento.
+
+  Read 1 file (ctrl+o to expand)
+
+● Bash(mkdir -p
+      /home/argen/ti/fullcycle-mba-ia/talks/dev-workflow-test/docs/fdds)
+  ⎿  Done
+
+● Write(docs/fdds/fdd-001-gestao-usuarios-autenticacao.md)
+  ⎿  Wrote 674 lines to docs/fdds/fdd-001-gestao-usuarios-autenticacao.md
+      1 ### FDD: Gestao de Usuarios e Autenticacao
+      2 
+      3 Versao: 1.0
+      4 Data: 2026-03-26
+      5 Responsavel: Luiz Carlos
+      6 
+      7 ---
+      8 
+      9 ### 1. Contexto e motivacao tecnica
+     … +664 lines (ctrl+o to expand)
+
+● FDD gerado e salvo em docs/fdds/fdd-001-gestao-usuarios-autenticacao.md.
+
+  O documento cobre todas as 10 secoes:
+  1. Contexto e motivacao tecnica
+  2. Objetivos tecnicos (7 objetivos)
+  3. Escopo e exclusoes
+  4. Fluxos detalhados + 4 diagramas de sequencia Mermaid
+  5. Contratos publicos (8 endpoints com exemplos)
+  6. Erros, excecoes e fallback (14 erros mapeados)
+  7. Observabilidade (metricas, logs, tracing, alertas)
+  8. Dependencias e compatibilidade
+  9. Criterios de aceite tecnicos (20 criterios)
+  10. Riscos e mitigacao (4 riscos)
+
+  Deseja que eu exporte tambem o JSON estruturado?
+
+✻ Cogitated for 2m 37s
+
+❯ não                                                                           
+  ⎿  Found 100 new diagnostic issues in 1 file (ctrl+o to expand)
+
+● Entendido, sem JSON. O FDD está completo em
+  docs/fdds/fdd-001-gestao-usuarios-autenticacao.md.
